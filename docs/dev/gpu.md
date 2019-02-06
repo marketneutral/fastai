@@ -173,15 +173,14 @@ https://github.com/FrancescAlted/ipython_memwatcher
 
 ### Unusable GPU RAM per process
 
-As soon as you start using `cuda`, your GPU loses about 0.5GB RAM per process. For example this code consumes 0.5GB GPU RAM:
+As soon as you start using CUDA, your GPU loses some 300-500MB RAM per process. The exact size seems to be depending on the card and CUDA version. For example, on GeForce GTX 1070 Ti (8GB), the following code, running on CUDA 10.0, consumes 0.5GB GPU RAM:
 ```
 import torch
 torch.ones((1, 1)).cuda()
 ```
 This GPU memory is not accessible to your program's needs and it's not re-usable between processes. If you run two processes, each executing code on `cuda`, each will consume 0.5GB GPU RAM from the get going.
 
-This fixed chunk of memory is used by `cuDNN` kernels (~300MB) and `pytorch` (the rest) for its internal needs.
-
+This fixed chunk of memory is used by [CUDA context](https://stackoverflow.com/questions/43244645/what-is-a-cuda-context).
 
 ### Cached Memory
 
@@ -192,6 +191,9 @@ torch.cuda.empty_cache()
 ```
 
 If you have more than one process using the same GPU, the cached memory from one process is not accessible to the other. The above code executed by the first process will solve this issue and make the freed GPU RAM available to the other process.
+
+It also might be helpful to note that `torch.cuda.memory_cached()` doesn't show how much memory pytorch has free in the cache, but it just indicates how much memory it currently has allocated, with some of it being used and may be some being free. To measure how much free memory available to use is in the cache do: `torch.cuda.memory_cached()-torch.cuda.memory_allocated()`.
+
 
 
 ### Reusing GPU RAM
@@ -235,11 +237,18 @@ x3 = allocate_gb(3) # failure to allocate 3GB w/ RuntimeError: CUDA out of memor
 
 despite having a total of 4GB of free GPU RAM (cached and free), the last command will fail, because it can't get 3GB of contiguous memory.
 
-You can conclude from this example, that it's crucial to always free up anything that's on CUDA as soon as you're done using it, and only then move new objects to CUDA. Normally a simple `del obj` does the trick. However, if your object has circular references in it, it will not be freed despite the `del()` call, until `gc.collect()` will not be called by python. And until the latter happens, it'll still hold the allocated GPU RAM! And that also means that in some situations you may want to call `gc.collect()` yourself.
+Except, this example isn't quite valid, because under the hood CUDA relocates physical pages, and makes them appear as if they are of a contiguous type of memory to pytorch. So in the example above it'll reuse most or all of those fragments as long as there is nothing else occupying those memory pages.
+
+So for this example to be applicable to the CUDA memory fragmentation situation it needs to allocate fractions of a memory page, which currently for most CUDA cards is of 2MB. So if less than 2MB is allocated in the same scenario as this example, fragmentation will occur.
+
+Given that GPU RAM is a scarce resource, it helps to always try free up anything that's on CUDA as soon as you're done using it, and only then move new objects to CUDA. Normally a simple `del obj` does the trick. However, if your object has circular references in it, it will not be freed despite the `del()` call, until `gc.collect()` will not be called by python. And until the latter happens, it'll still hold the allocated GPU RAM! And that also means that in some situations you may want to call `gc.collect()` yourself.
 
 If you want to educate yourself on how and when the python garbage collector gets automatically invoked see [gc](https://docs.python.org/3/library/gc.html#gc.get_threshold) and [this](https://rushter.com/blog/python-garbage-collector/).
 
 
+### Peak Memory Usage
+
+If you were to run a GPU memory profiler on a function like `Learner` `fit()` you would notice that on the very first epoch it will cause a very large GPU RAM usage spike and then stabilize at a much lower memory usage pattern. This happens because the pytorch memory allocator tries to build the computational graph and gradients for the loaded model in the most efficient way. Luckily, you don't need to worry about this spike, since the allocator is smart enough to recognize when the memory is tight and it will be able to do the same with much less memory, just not as efficiently. Typically, continuing with the `fit()` example, the allocator needs to have at least as much memory as the 2nd and subsequent epochs require for the normal run.  You can read an excellent thread on this topic [here](https://discuss.pytorch.org/t/high-gpu-memory-usage-problem/34694).
 
 
 ### pytorch Tensor Memory Tracking
@@ -257,3 +266,28 @@ for obj in gc.get_objects():
 Note, that gc will not contain some tensors that consume memory [inside autograd](https://discuss.pytorch.org/t/how-to-debug-causes-of-gpu-memory-leaks/6741/22).
 
 Here is a good [discussion on this topic](https://discuss.pytorch.org/t/how-to-debug-causes-of-gpu-memory-leaks/6741) with more related code snippets.
+
+
+### GPU Reset
+
+If for some reason after exiting the python process the GPU doesn't free the memory, you can try to reset it (change 0 to the desired GPU ID):
+
+```
+sudo nvidia-smi --gpu-reset -i 0
+```
+
+When using multiprocessing, sometimes some of the client processes get stuck and go zombie and won't release the GPU memory. They also may become invisible to `nvidia-smi`, so that it reports no memory used, but the card is unusable and fails with OOM even when trying to create a tiny tensor on that card. In such a case locate the relevant processes with `fuser -v /dev/nvidia*`and kill them with `kill -9`.
+
+This blog [post](https://jianchao-li.github.io/2018/11/02/killing-pytorch-multi-gpu-training-the-safe-way/) suggests the following trick to arrange for the processes to cleanly exit on demand:
+```
+if os.path.isfile('kill.me'):
+    num_gpus = torch.cuda.device_count()
+    for gpu_id in range(num_gpus):
+        torch.cuda.set_device(gpu_id)
+        torch.cuda.empty_cache()
+    exit(0)
+```
+After you add this code to the training iteration, once you want to stop it, just cd into the directory of the training program and run
+```
+touch kill.me
+```

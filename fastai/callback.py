@@ -16,11 +16,11 @@ class OptimWrapper():
 
     @classmethod
     def create(cls, opt_func:Union[type,Callable], lr:Union[float,Tuple,List],
-               layer_groups:ModuleList, **kwargs:Any)->optim.Optimizer:
+               layer_groups:ModuleList, wd:Floats=0., true_wd:bool=False, bn_wd:bool=True)->optim.Optimizer:
         "Create an `optim.Optimizer` from `opt_func` with `lr`. Set lr on `layer_groups`."
         split_groups = split_bn_bias(layer_groups)
         opt = opt_func([{'params': trainable_params(l), 'lr':0} for l in split_groups])
-        opt = cls(opt, **kwargs)
+        opt = cls(opt, wd=wd, true_wd=true_wd, bn_wd=bn_wd)
         opt.lr,opt.opt_func = listify(lr, layer_groups),opt_func
         return opt
     
@@ -152,6 +152,7 @@ class Callback():
         pass
     
     def get_state(self, minimal:bool=True):
+        "Return the inner state of the `Callback`, `minimal` or not."
         to_remove = ['exclude', 'not_min'] + getattr(self, 'exclude', []).copy()
         if minimal: to_remove += getattr(self, 'not_min', []).copy()
         return {k:v for k,v in self.__dict__.items() if k not in to_remove}
@@ -199,11 +200,12 @@ class CallbackHandler():
         return [getattr(cb, f'on_{cb_name}')(**self.state_dict, **kwargs) for cb in self.callbacks]
 
     def set_dl(self, dl:DataLoader):
+        "Set the current `dl` used."
         if hasattr(self, 'cb_dl'): self.callbacks.remove(self.cb_dl)
         if isinstance(dl.dataset, Callback):
             self.callbacks.append(dl.dataset)
             self.cb_dl = dl.dataset
-    
+
     def on_train_begin(self, epochs:int, pbar:PBar, metrics:MetricFuncList)->None:
         "About to start learning."
         self.state_dict = _get_init_state()

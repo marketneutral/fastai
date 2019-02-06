@@ -73,22 +73,22 @@ class DeviceDataLoader():
     @classmethod
     def create(cls, dataset:Dataset, bs:int=64, shuffle:bool=False, device:torch.device=defaults.device,
                tfms:Collection[Callable]=tfms, num_workers:int=defaults.cpus, collate_fn:Callable=data_collate, **kwargs:Any):
-        "Create DeviceDataLoader from `dataset` with `bs` and `shuffle`: processs using `num_workers`."
+        "Create DeviceDataLoader from `dataset` with `bs` and `shuffle`: process using `num_workers`."
         return cls(DataLoader(dataset, batch_size=bs, shuffle=shuffle, num_workers=num_workers, **kwargs),
                    device=device, tfms=tfms, collate_fn=collate_fn)
 
 class DataBunch():
     "Bind `train_dl`,`valid_dl` and `test_dl` in a a data object."
-
+    
     def __init__(self, train_dl:DataLoader, valid_dl:DataLoader, fix_dl:DataLoader=None, test_dl:Optional[DataLoader]=None,
-                 device:torch.device=None, tfms:Optional[Collection[Callable]]=None, path:PathOrStr='.',
+                 device:torch.device=None, dl_tfms:Optional[Collection[Callable]]=None, path:PathOrStr='.',
                  collate_fn:Callable=data_collate, no_check:bool=False):
-        self.tfms = listify(tfms)
+        self.dl_tfms = listify(dl_tfms)
         self.device = defaults.device if device is None else device
         assert not isinstance(train_dl,DeviceDataLoader)
         def _create_dl(dl, **kwargs):
             if dl is None: return None
-            return DeviceDataLoader(dl, self.device, self.tfms, collate_fn, **kwargs)
+            return DeviceDataLoader(dl, self.device, self.dl_tfms, collate_fn, **kwargs)
         self.train_dl,self.valid_dl,self.fix_dl,self.test_dl = map(_create_dl, [train_dl,valid_dl,fix_dl,test_dl])
         if fix_dl is None: self.fix_dl = self.train_dl.new(shuffle=False, drop_last=False)
         self.single_dl = _create_dl(DataLoader(valid_dl.dataset, batch_size=1, num_workers=0))
@@ -101,19 +101,19 @@ class DataBunch():
     @staticmethod
     def _init_ds(train_ds:Dataset, valid_ds:Dataset, test_ds:Optional[Dataset]=None):
         # train_ds, but without training tfms
-        fix_ds = valid_ds.new(train_ds.x, train_ds.y) if hasattr(valid_ds,'new') else None
+        fix_ds = valid_ds.new(train_ds.x, train_ds.y) if hasattr(valid_ds,'new') else train_ds
         return [o for o in (train_ds,valid_ds,fix_ds,test_ds) if o is not None]
 
     @classmethod
     def create(cls, train_ds:Dataset, valid_ds:Dataset, test_ds:Optional[Dataset]=None, path:PathOrStr='.', bs:int=64,
-               num_workers:int=defaults.cpus, tfms:Optional[Collection[Callable]]=None, device:torch.device=None,
+               num_workers:int=defaults.cpus, dl_tfms:Optional[Collection[Callable]]=None, device:torch.device=None,
                collate_fn:Callable=data_collate, no_check:bool=False)->'DataBunch':
         "Create a `DataBunch` from `train_ds`, `valid_ds` and maybe `test_ds` with a batch size of `bs`."
         datasets = cls._init_ds(train_ds, valid_ds, test_ds)
         val_bs = bs
         dls = [DataLoader(d, b, shuffle=s, drop_last=s, num_workers=num_workers) for d,b,s in
                zip(datasets, (bs,val_bs,val_bs,val_bs), (True,False,False,False)) if d is not None]
-        return cls(*dls, path=path, device=device, tfms=tfms, collate_fn=collate_fn, no_check=no_check)
+        return cls(*dls, path=path, device=device, dl_tfms=dl_tfms, collate_fn=collate_fn, no_check=no_check)
 
     def __getattr__(self,k:int)->Any: return getattr(self.train_dl, k)
 
@@ -157,12 +157,13 @@ class DataBunch():
     def show_batch(self, rows:int=5, ds_type:DatasetType=DatasetType.Train, **kwargs)->None:
         "Show a batch of data in `ds_type` on a few `rows`."
         x,y = self.one_batch(ds_type, True, True)
-        if self.train_ds.x._square_show: rows = rows ** 2
-        xs = [self.train_ds.x.reconstruct(grab_idx(x, i)) for i in range(rows)]
+        n_items = rows **2 if self.train_ds.x._square_show else rows
+        if self.dl(ds_type).batch_size < n_items: n_items = self.dl(ds_type).batch_size
+        xs = [self.train_ds.x.reconstruct(grab_idx(x, i)) for i in range(n_items)]
         #TODO: get rid of has_arg if possible
         if has_arg(self.train_ds.y.reconstruct, 'x'):
             ys = [self.train_ds.y.reconstruct(grab_idx(y, i), x=x) for i,x in enumerate(xs)]
-        else : ys = [self.train_ds.y.reconstruct(grab_idx(y, i)) for i in range(rows)]
+        else : ys = [self.train_ds.y.reconstruct(grab_idx(y, i)) for i in range(n_items)]
         self.train_ds.x.show_xys(xs, ys, **kwargs)
 
     def export(self, fname:str='export.pkl'):
@@ -201,18 +202,31 @@ class DataBunch():
         self.train_dl.batch_size,self.valid_dl.batch_size = v,v
         if self.test_dl is not None: self.test_dl.batch_size = v
 
+    @property
+    def classes(self): return self.train_ds.y.classes
+    
     def sanity_check(self):
         "Check the underlying data in the training set can be properly loaded."
         final_message = "You can deactivate this warning by passing `no_check=True`."
         if not hasattr(self.train_ds, 'items') or len(self.train_ds.items) == 0 or not hasattr(self.train_dl, 'batch_sampler'): return
         if len(self.train_dl) == 0: 
-            warn(f"Your training dataloader is empty, you have only {self.train_dl.datasets} items in your training set")
+            warn(f"""Your training dataloader is empty, you have only {len(self.train_dl.dataset)} items in your training set.
+                 Your batch size is {self.train_dl.batch_size}, you should lower it.""")
             print(final_message)
             return
         idx = next(iter(self.train_dl.batch_sampler))
-        try: samples = [self.train_dl.dataset[i] for i in idx]
-        except:
-            warn(f"There seems to be something wrong with your dataset, can't access self.train_ds[i] for all i in {idx}")
+        samples,fails = [],[]
+        for i in idx:
+            try:    samples.append(self.train_dl.dataset[i])
+            except: fails.append(i)
+        if len(fails) > 0:
+            if len(fails) == len(idx):
+                warn_msg = "There seems to be something wrong with your dataset, can't access any element of self.train_ds.\n"
+                warn_msg += f"Tried: {show_some(idx)}"
+            else:
+                warn_msg = "There seems to be something wrong with your dataset, can't access these elements "
+                warn_msg += f"in self.train_ds: {show_some(fails)}"
+            warn(warn_msg)
             print(final_message)
             return
         try: batch = self.collate_fn(samples)

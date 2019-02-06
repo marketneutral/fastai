@@ -50,7 +50,7 @@ You can skip this step if you have done it once already on the system you're mak
 
 3. You can also setup your client to have transparent access to anaconda tools, see https://anaconda.org/YOURUSERNAME/settings/access (adjust the url to insert your username).
 
-    You don't really need it, as the anaconda client cashes your credentials so you need to login only infrequently.
+    You don't really need it, as the anaconda client caches your credentials so you need to login only infrequently.
 
 4. Install upload clients
 
@@ -247,7 +247,7 @@ We are ready to make the new release branch:
                                   # conda install -y -c fastai fastai==1.0.6
     ```
 
-8. if some problems were detected during the release process, or something was committed by mistake into the release branch, and as a result changes were made to the release branch, merge those back into the master branch. Except for the version change in `fastaai/version.py`.
+8. if some problems were detected during the release process, or something was committed by mistake into the release branch, and as a result changes were made to the release branch, merge those back into the master branch. Except for the version change in `fastai/version.py`.
 
     1. check whether anything needs to be backported
 
@@ -1116,6 +1116,8 @@ When debugging issues it helps to know what packages have been installed. The fo
 
 The comparison is useful for identifying differences in these two package environment (for example when CI build fails with pypi but not with conda).
 
+If you want an easier to read output use `conda-env-compare.pl` from [conda-tools](https://github.com/stas00/conda-tools).
+
 
 ### Package Dependencies
 
@@ -1357,9 +1359,9 @@ rm req1.txt req2.txt req.txt
 The same can be repeated for getting test requirements, just repeat the same process inside `tests` directory.
 
 
-## Copying packages for other channels
+### Copying packages for other channels
 
-Currently we want to use the version of spacy and some of its deps from the conda-forge channel, instead of the main anaconda channel. To do this, we copy the relevent packages in to our channel, as so:
+Currently we want to use the version of spacy and some of its deps from the conda-forge channel, instead of the main anaconda channel. To do this, we copy the relevant packages in to our channel, as so:
 
 ```
 anaconda copy conda-forge/spacy/2.0.18 --to-owner fastai --from-label gcc7

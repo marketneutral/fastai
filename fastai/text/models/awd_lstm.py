@@ -1,5 +1,5 @@
-from ..torch_core import *
-from ..layers import *
+from ...torch_core import *
+from ...layers import *
 
 __all__ = ['EmbeddingDropout', 'LinearDecoder', 'MultiBatchRNNCore', 'PoolingLinearClassifier', 'RNNCore', 'RNNDropout', 
            'SequentialRNN', 'WeightDropout', 'dropout_mask', 'get_language_model', 'get_rnn_classifier']
@@ -85,7 +85,7 @@ class RNNCore(nn.Module):
         self.encoder_dp = EmbeddingDropout(self.encoder, embed_p)
         if self.qrnn:
             #Using QRNN requires an installation of cuda
-            from .qrnn.qrnn1 import QRNNLayer
+            from .qrnn import QRNNLayer
             self.rnns = [QRNNLayer(emb_sz if l == 0 else n_hid, (n_hid if l != n_layers - 1 else emb_sz)//self.ndir,
                                    save_prev_x=True, zoneout=0, window=2 if l == 0 else 1, output_gate=True,
                                    use_cuda=torch.cuda.is_available()) for l in range(n_layers)]
@@ -94,7 +94,7 @@ class RNNCore(nn.Module):
             self.rnns = [nn.LSTM(emb_sz if l == 0 else n_hid, (n_hid if l != n_layers - 1 else emb_sz)//self.ndir,
                 1, bidirectional=bidir, batch_first=True) for l in range(n_layers)]
             self.rnns = [WeightDropout(rnn, weight_p) for rnn in self.rnns]
-        self.rnns = torch.nn.ModuleList(self.rnns)
+        self.rnns = nn.ModuleList(self.rnns)
         self.encoder.weight.data.uniform_(-self.initrange, self.initrange)
         self.input_dp = RNNDropout(input_p)
         self.hidden_dps = nn.ModuleList([RNNDropout(hidden_p) for l in range(n_layers)])
@@ -118,12 +118,11 @@ class RNNCore(nn.Module):
     def _one_hidden(self, l:int)->Tensor:
         "Return one hidden state."
         nh = (self.n_hid if l != self.n_layers - 1 else self.emb_sz)//self.ndir
-        return self.weights.new(self.ndir, self.bs, nh).zero_()
+        return one_param(self).new(self.ndir, self.bs, nh).zero_()
 
     def reset(self):
         "Reset the hidden states."
         [r.reset() for r in self.rnns if hasattr(r, 'reset')]
-        self.weights = next(self.parameters()).data
         if self.qrnn: self.hidden = [self._one_hidden(l) for l in range(self.n_layers)]
         else: self.hidden = [(self._one_hidden(l), self._one_hidden(l)) for l in range(self.n_layers)]
 
@@ -143,7 +142,6 @@ class LinearDecoder(nn.Module):
         raw_outputs, outputs = input
         output = self.output_dp(outputs[-1])
         decoded = self.decoder(output)
-        #decoded = self.decoder(output.contiguous().view(output.size(0)*output.size(1), output.size(2)))
         return decoded, raw_outputs, outputs
 
 class SequentialRNN(nn.Sequential):
@@ -211,7 +209,7 @@ def get_language_model(vocab_sz:int, emb_sz:int, n_hid:int, n_layers:int, pad_to
     model.reset()
     return model
 
-def get_rnn_classifier(bptt:int, max_seq:int, n_class:int, vocab_sz:int, emb_sz:int, n_hid:int, n_layers:int,
+def get_rnn_classifier(bptt:int, max_seq:int, vocab_sz:int, emb_sz:int, n_hid:int, n_layers:int,
                        pad_token:int, layers:Collection[int], drops:Collection[float], bidir:bool=False, qrnn:bool=False,
                        hidden_p:float=0.2, input_p:float=0.6, embed_p:float=0.1, weight_p:float=0.5)->nn.Module:
     "Create a RNN classifier model."

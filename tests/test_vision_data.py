@@ -1,11 +1,18 @@
 import pytest
 from fastai.vision import *
 from fastai.vision.data import verify_image
+from utils.text import *
 import PIL
+import responses
 
 @pytest.fixture(scope="module")
 def path():
     path = untar_data(URLs.MNIST_TINY)
+    return path
+
+@pytest.fixture(scope="module")
+def path_var_size():
+    path = untar_data(URLs.MNIST_VAR_SIZE_TINY)
     return path
 
 def mnist_tiny_sanity_test(data):
@@ -26,12 +33,44 @@ def test_from_name_re(path):
     data = ImageDataBunch.from_name_re(path, fnames, pat, ds_tfms=(rand_pad(2, 28), []))
     mnist_tiny_sanity_test(data)
 
+def test_from_lists(path):
+    df = pd.read_csv(path/'labels.csv')
+    fnames = [path/f for f in df['name'].values]
+    labels = df['label'].values
+    data = ImageDataBunch.from_lists(path, fnames, labels)
+    mnist_tiny_sanity_test(data)
+    #Check labels weren't shuffled for the validation set
+    valid_fnames = data.valid_ds.x.items
+    pat = re.compile(r'/([^/]+)/\d+.png$')
+    expected_labels = [int(pat.search(str(o)).group(1)) for o in valid_fnames]
+    current_labels = [int(str(l)) for l in data.valid_ds.y]
+    assert len(expected_labels) == len(current_labels)
+    assert np.all(np.array(expected_labels) == np.array(current_labels))
+
 def test_from_csv_and_from_df(path):
     for func in ['from_csv', 'from_df']:
         files = []
         if func is 'from_df': data = ImageDataBunch.from_df(path, df=pd.read_csv(path/'labels.csv'), size=28)
         else: data = ImageDataBunch.from_csv(path, size=28)
         mnist_tiny_sanity_test(data)
+
+def test_from_plus_resize(path, path_var_size):
+    # in this test the 2 datasets are of (1) 28x28, (2) var-size but larger than
+    # 28x28, so we don't need to check whether the original size of the image is
+    # different from the resized one, we always resize to < 28x28
+    for p in [path, path_var_size]: # identical + var sized inputs
+        fnames = get_files(p/'train', recurse=True)
+        pat = r'/([^/]+)\/\d+.png$'
+        # check 3 different size arg are (1) supported and (2) no warnings are issued
+        for size in [14, (14,14), (14,20)]:
+            with CaptureStderr() as cs:
+                data = ImageDataBunch.from_name_re(p, fnames, pat, ds_tfms=None, size=size)
+            assert len(cs.err)==0, f"got collate_fn warning {cs.err}"
+
+            x,_ = data.train_ds[0]
+            size_want = (size, size) if isinstance(size, int) else size
+            size_real = x.size
+            assert size_want == size_real, f"size mismatch after resize {size} expected {size_want}, got {size_real}"
 
 def test_multi_iter_broken(path):
     data = ImageDataBunch.from_folder(path, ds_tfms=(rand_pad(2, 28), []))
@@ -68,7 +107,7 @@ def test_denormalize(path):
     denormalized = denormalize(normalized_x, original_x.mean(), original_x.std())
     assert round(original_x.mean().item(), 3) == round(denormalized.mean().item(), 3)
     assert round(original_x.std().item(), 3) == round(denormalized.std().item(), 3)
-        
+
 def test_download_images():
     base_url = 'http://files.fast.ai/data/tst_images/'
     fnames = ['tst0.jpg', 'tst1.png', 'tst2.tif']
@@ -86,6 +125,29 @@ def test_download_images():
             assert os.path.getsize(files[0]) > 0
     finally:
         shutil.rmtree(tmp_path)
+
+@responses.activate
+def test_trunc_download():
+    from io import StringIO
+    with StringIO('test_file_that_is_not_image') as cc_trunc:
+        file_io = cc_trunc.read()
+        mock_headers = {'Content-Type':'text/plain', 'Content-Length':'168168549'}
+        responses.add(responses.GET, 'http://files.fast.ai/data/examples/coco_tiny.tgz',
+                      body=file_io, status=200, headers=mock_headers)
+
+        url = URLs.COCO_TINY
+        fname = datapath4file(f'{url2name(url)}.tgz')
+        try:
+            coco = untar_data(url,force_download=True)
+        except AssertionError as e:
+            # from fastai.datasets import Config, url2name
+            data_dir = Config().data_path()
+            expected_error =  f"Downloaded file {fname} does not match checksum expected! Remove that file from {data_dir} and try your code again."
+            assert e.args[0] == expected_error
+        except:
+            print(f"untar_data({URLs.COCO_TINY}) had Unexpected error:", sys.exc_info()[0])
+        finally:
+            if fname.exists(): os.remove(fname)
 
 def test_verify_images(path):
     tmp_path = path/'tmp'
@@ -123,7 +185,7 @@ def test_vision_datasets():
 def test_multi():
     path = untar_data(URLs.PLANET_TINY)
     data = (ImageItemList.from_csv(path, 'labels.csv', folder='train', suffix='.jpg')
-        .random_split_by_pct(seed=42).label_from_df(sep=' ').databunch())
+        .random_split_by_pct(seed=42).label_from_df(label_delim=' ').databunch())
     x,y = data.valid_ds[0]
     assert x.shape[0]==3
     assert data.c==len(y.data)==14
@@ -168,14 +230,14 @@ def test_coco():
             .transform(get_transforms(), tfm_y=True)
             .databunch(bs=16, collate_fn=bb_pad_collate))
     _check_data(data, 160, 40)
-    
+
 def test_coco_same_size():
     def get_y_func(fname):
         cat = fname.parent.name
         bbox = torch.cat([torch.randint(0,5,(2,)), torch.randint(23,28,(2,))])
         bbox = list(bbox.float().numpy())
         return [[bbox, bbox], [cat, cat]]
-    
+
     coco = untar_data(URLs.MNIST_TINY)
     bs = 16
     data = (ObjectItemList.from_folder(coco)
@@ -204,7 +266,7 @@ def test_image_to_image_different_y_size():
     get_y_func = lambda o:o
     mnist = untar_data(URLs.MNIST_TINY)
     tfms = get_transforms()
-    data = (ImageItemList.from_folder(mnist)
+    data = (ImageImageList.from_folder(mnist)
             .random_split_by_pct()
             .label_from_func(get_y_func)
             .transform(tfms, size=20)
@@ -220,7 +282,7 @@ def test_image_to_image_different_tfms():
     x_tfms = get_transforms()
     y_tfms = [[t for t in x_tfms[0]], [t for t in x_tfms[1]]]
     y_tfms[0].append(flip_lr())
-    data = (ImageItemList.from_folder(mnist)
+    data = (ImageImageList.from_folder(mnist)
             .random_split_by_pct()
             .label_from_func(get_y_func)
             .transform(x_tfms)
@@ -232,7 +294,7 @@ def test_image_to_image_different_tfms():
     y1 = y[0]
     x1r = flip_lr(Image(x1)).data
     assert (y1 == x1r).all()
-    
+
 def test_vision_pil2tensor():
     path  = Path(__file__).parent / "data/test/images"
     files = list(Path(path).glob("**/*.*"))
