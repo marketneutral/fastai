@@ -85,7 +85,7 @@ def execute_nb(fname, metadata=None, save=True, show_doc_only=False):
     metadata = metadata or {}
     ep.preprocess(nb, metadata)
     if save:
-        with open(fname, 'wt') as f: nbformat.write(nb, f)
+        with open(fname, 'wt', encoding='utf-8') as f: nbformat.write(nb, f)
         NotebookNotary().sign(nb)
 
 def _symbol_skeleton(name): return [get_doc_cell(name), get_md_cell(f"`{name}`")]
@@ -95,7 +95,7 @@ def create_module_page(mod, dest_path, force=False):
     nb = get_empty_notebook()
     mod_name = mod.__name__
     strip_name = strip_fastai(mod_name)
-    init_cell = [get_md_cell(f'# {strip_name}'), get_md_cell('Type an introduction of the package here.')]
+    init_cell = [get_md_cell(f'## Title for {strip_name} (use plain english, not module name!)'), get_md_cell('Type an introduction of the package here.')]
     cells = [get_code_cell(f'from fastai.gen_doc.nbdoc import *\nfrom {mod_name} import * ', True)]
 
     gvar_map = get_global_vars(mod)
